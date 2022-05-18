@@ -1,0 +1,541 @@
+﻿using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization.Infrastructure;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.Azure.KeyVault;
+using Microsoft.Azure.Storage;
+using Microsoft.Azure.Storage.Blob;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.IdentityModel.Logging;
+using Microsoft.IdentityModel.Protocols;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
+using Microsoft.IdentityModel.Tokens;
+
+using Newtonsoft.Json;
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Web;
+
+namespace D.DB
+{
+	public class Startup
+	{
+		//TODO remove this as soon as we have a better way to handle
+		//ErrorCode20803: Unable to obtain configuration from: 'System.String'.
+		public static int ErrorCode20803Count = 0;
+		private static Timer _timer;
+
+		private ILogger<Startup> _logger;
+		private readonly Log log;
+
+		public Startup(IConfiguration configuration)
+		{
+			Configuration = configuration;
+			DBConfig = new DBConfig(configuration);
+			//Ensures all variables are initialized for the DB to run properly
+			CheckIsValid();
+			log = new Log(DBConfig.ApplicationName, DBConfig.ApplicationVersion);
+
+			//TODO remove me when fixed
+			if (TimeSpan.TryParse(Environment.GetEnvironmentVariable("ErrorCode20803DecrementInterval"), out TimeSpan interval))
+			{
+				log.LogInfo(log.ALL, log.ALL, "Configuring ErrorCode20803 decrement at " + interval.ToString());
+				_timer = new Timer((state) =>
+				{
+					if (ErrorCode20803Count > 0) ErrorCode20803Count--;
+				});
+				_timer.Change(TimeSpan.Zero, interval);
+			}
+			else
+			{
+				log.LogInfo(log.ALL, log.ALL, "Skipping ErrorCode20803 code");
+			}
+		}
+
+		public IConfiguration Configuration { get; }
+		public IDBConfig DBConfig { get; }
+
+		// This method gets called by the runtime. Use this method to add services to the container.
+		public void ConfigureServices(IServiceCollection services)
+		{
+			var handler = new HttpClientHandler
+			{
+				AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+				UseProxy = false,
+				MaxConnectionsPerServer = 1000
+			};
+			var httpClient = new HttpClient(handler);
+			var kvClient = new KeyVaultClient(CommonKeyVault.TokenCallback.Invoke, httpClient);
+			string vaultName = Environment.GetEnvironmentVariable(Constants.KV_VAULT);
+			var secretURL = $"https://{vaultName}.vault.azure.net/keys/{Configuration[Constants.AZURECONFIG_DATAPROTECTIONKEYNAME]}";
+
+			var storage = CloudStorageAccount.Parse(GetCommonKeyVault().DataProtectionStorage);
+
+			_ = services.AddDataProtection()
+				.PersistKeysToAzureBlobStorage(storage, string.Format("common/{0}/{0}_basev{1}/Test.xml", DBConfig.ApplicationName.ToLower(), DBConfig.ApplicationVersion))
+				.ProtectKeysWithAzureKeyVault(kvClient, secretURL);
+
+			_ = services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>()
+				.AddAuthentication(sharedOptions =>
+				{
+					sharedOptions.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+					sharedOptions.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
+				})
+				.AddOpenIdConnect(SetupOpenIDConnectOptions)
+				.AddCookie(o => o.Events = new CookieAuthenticationEvents
+				{
+					OnRedirectToAccessDenied = async context =>
+					{
+						(string hostPrefix, string tenantId) = GetLogInfo(context.Request);
+						log.LogInfo(hostPrefix, tenantId, "Access denied");
+						context.Response.ContentType = "application/json";
+						context.Response.StatusCode = 403;
+						await context.Response.WriteAsync("{\"error\":\"Unauthorized\"}");
+					}
+				});
+
+			_ = services.AddAuthorization(Authorize)
+				.Configure<CookiePolicyOptions>(options =>
+				{
+					// This lambda determines whether user consent for non-essential cookies is needed for a given request.
+					options.CheckConsentNeeded = context => true;
+					options.MinimumSameSitePolicy = SameSiteMode.None;
+				});
+
+			long memCacheSizeLimit = string.IsNullOrEmpty(Environment.GetEnvironmentVariable("MemoryCacheSizeLimit"))
+				? long.Parse(Configuration[Constants.LOGGING_MEMORYCACHESIZELIMIT])
+				: long.Parse(Environment.GetEnvironmentVariable("MemoryCacheSizeLimit") ?? string.Empty);
+
+			_ = services.AddMemoryCache(memCacheOptions => memCacheOptions.SizeLimit = memCacheSizeLimit)
+				.AddMvc(m => m.EnableEndpointRouting = false)
+				.AddControllersAsServices()
+				.AddNewtonsoftJson();
+		}
+
+		// This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
+		public void Configure(IApplicationBuilder app, IWebHostEnvironment env, ILogger<Startup> logger)
+		{
+			_logger = logger;
+
+			_ = app.UseHttpsRedirection()
+				.UseStaticFiles("/DB")
+				.UsePathBase("/DB");
+
+			if (!env.IsDevelopment())
+			{
+				// The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
+				_ = app.UseHsts();
+			}
+			else
+			{
+				IdentityModelEventSource.ShowPII = true;
+			}
+
+			int.TryParse(Environment.GetEnvironmentVariable("ErrorCode20803Threshold"), out int ErrorCode20803cutoff);
+
+			_ = app.UseDctAksStatusEndpoint(Configuration[Constants.AZURECONFIG_HEALTHCHECKROUTE], true)
+				//.UseDctLivenessProbe("/api/v1/liveness", true)
+				.Use(async (context, next) =>
+				{
+					if (context.Request.Path != "/api/v1/liveness")
+					{
+						await next.Invoke();
+					}
+					else
+					{
+						context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+						await CommonKeyVault.TokenCallback("", "https://vault.azure.net", "");
+						if (ErrorCode20803cutoff == 0 || ErrorCode20803Count < ErrorCode20803cutoff)
+							context.Response.StatusCode = StatusCodes.Status200OK;
+						else
+							log.LogCritical(log.ALL, log.ALL, $"ErrorCode20803 Cutoff: {ErrorCode20803cutoff} Count: {ErrorCode20803Count}. Failing liveness probe");
+					}
+				})
+				.UseExceptionHandler(inner => inner.Run(HandleErrorsAsync))
+				.UseStaticFiles()
+				.UseCookiePolicy()
+				.UseAuthentication()
+				.UseMvc(routes => routes.MapRoute(
+						name: "default",
+						template: "{controller=Home}/{action=Index}/{id?}"));
+		}
+
+		private void SetupOpenIDConnectOptions(OpenIdConnectOptions oid)
+		{
+			var vault = GetCommonKeyVault();
+			string b2cValidIssuer = vault.GetSecret("B2CTenant");
+
+			oid.UseTokenLifetime = true;
+			oid.TokenValidationParameters = new TokenValidationParameters
+			{
+				IssuerValidator = (issuer, token, parameters) =>
+				{
+					//TODO remove this when we aren't getting login.microsoftonline.com tokens anymore.
+					//Deprecation of login.microsoftonline.com is scheduled for Jan 4 2021
+					string b2cTenant = b2cValidIssuer.ToLower().Replace("onmicrosoft.com", "b2clogin.com");
+					if (new Uri(issuer).Host == b2cValidIssuer ||
+						issuer == parameters.ValidIssuer ||
+						parameters.ValidIssuers.Contains(issuer) ||
+						parameters.ValidIssuers.Select(i => i.ToLower().Replace(b2cTenant, "login.microsoftonline.com")).Contains(issuer.ToLower()))
+						return issuer;
+
+					var validIssuer = parameters.ValidIssuer ?? "null";
+					var validIssuers = parameters.ValidIssuers == null
+						? "null"
+						: !parameters.ValidIssuers.Any()
+							? "empty"
+							: string.Join(", ", parameters.ValidIssuers);
+					string msg = $"ErrorCode10205: Issuer validation failed. Issuer: '{issuer}'. Did not match: B2CValidIssuer '{b2cValidIssuer}', validationParameters.ValidIssuer: '{validIssuer}', or validationParameters.ValidIssuers: '{validIssuers}'.";
+
+					throw new SecurityTokenInvalidIssuerException(msg) { InvalidIssuer = issuer };
+				},
+				NameClaimType = "name",
+				ValidateIssuer = true
+			};
+
+			oid.Events = new OpenIdConnectEvents()
+			{
+				OnRedirectToIdentityProvider = OnRedirectToIdentityProvider,
+				OnRemoteFailure = OnRemoteFailure,
+				OnMessageReceived = OnMessageReceived
+			};
+			oid.ClientId = DBConfig.BaseClientId;
+			oid.MetadataAddress = DBConfig.MetadataAddress(DBConfig.BasePolicy);
+		}
+
+		public Task OnMessageReceived(MessageReceivedContext context)
+		{
+			string urlId = new CoreDomainResolver(context.HttpContext.Request).GetDomainForCurrentContext(true);
+			AzureAdB2COptions options = GetTenantSpecificOptions(context.HttpContext);
+
+			context.ProtocolMessage.ClientId = options.ClientId;
+			bool customURLHeaderExists = context.Request.Headers.TryGetValue(Constants.X_CUSTOM_URL, out Microsoft.Extensions.Primitives.StringValues customURL);
+			context.ProtocolMessage.RedirectUri = customURLHeaderExists
+				? DBConfig.RedirectUri(customURL[customURL.Count - 1] + context.Request.PathBase)
+				: DBConfig.RedirectUri(urlId + context.Request.PathBase);
+
+			context.ProtocolMessage.IssuerAddress = DBConfig.IssuerAddress(options.SignUpSignInPolicyId);
+			context.Options.MetadataAddress = DBConfig.MetadataAddress(options.SignUpSignInPolicyId);
+			context.Options.ClientId = options.ClientId;
+			context.Options.ConfigurationManager = new ConfigurationManager<OpenIdConnectConfiguration>
+				(context.Options.MetadataAddress, new OpenIdConnectConfigurationRetriever());
+			context.Options.TokenValidationParameters.ValidAudience = options.ClientId;
+
+			return Task.FromResult(0);
+		}
+
+		public Task OnRedirectToIdentityProvider(RedirectContext context)
+		{
+			try
+			{
+				string urlId = new CoreDomainResolver(context.HttpContext.Request).GetDomainForCurrentContext(true);
+				AzureAdB2COptions options = GetTenantSpecificOptions(context.HttpContext);
+
+				context.ProtocolMessage.ClientId = options.ClientId;
+				bool customURLHeaderExists = context.Request.Headers.TryGetValue(Constants.X_CUSTOM_URL, out Microsoft.Extensions.Primitives.StringValues customURL);
+				context.ProtocolMessage.RedirectUri = customURLHeaderExists
+					? DBConfig.RedirectUri(customURL[customURL.Count - 1] + context.Request.PathBase)
+					: DBConfig.RedirectUri(urlId + context.Request.PathBase);
+
+				context.ProtocolMessage.IssuerAddress = DBConfig.IssuerAddress(options.SignUpSignInPolicyId);
+				context.Options.MetadataAddress = DBConfig.MetadataAddress(options.SignUpSignInPolicyId);
+				context.Options.ClientId = options.ClientId;
+				context.Options.ConfigurationManager = new ConfigurationManager<OpenIdConnectConfiguration>
+					(context.Options.MetadataAddress, new OpenIdConnectConfigurationRetriever());
+				context.Options.TokenValidationParameters.ValidAudience = options.ClientId;
+
+				if (context.Properties.Items.TryGetValue(AzureAdB2COptions.PolicyAuthenticationProperty, out string policy) &&
+					!policy.Equals(DBConfig.BasePolicy))
+				{
+					context.ProtocolMessage.Scope = OpenIdConnectScope.OpenIdProfile;
+					context.ProtocolMessage.ResponseType = OpenIdConnectResponseType.IdToken;
+					context.ProtocolMessage.IssuerAddress = context.ProtocolMessage.IssuerAddress.ToLower()
+						.Replace(DBConfig.BasePolicy.ToLower(), policy.ToLower());
+
+					_ = context.Properties.Items.Remove(AzureAdB2COptions.PolicyAuthenticationProperty);
+				}
+			}
+			catch (Exception ex)
+			{
+				try
+				{
+					(string hostPrefix, string tenantId) = GetLogInfo(context.Request);
+					string logMessage = string.Concat(ex.Message, ex.StackTrace, ex.InnerException, ex.Data);
+					log.LogError(hostPrefix, tenantId, logMessage);
+				}
+				catch { }
+			}
+
+			return Task.FromResult(0);
+		}
+
+		public Task OnRemoteFailure(RemoteFailureContext context)
+		{
+			context.HandleResponse();
+
+			try
+			{
+				(string hostPrefix, string tenantId) = GetLogInfo(context.Request);
+				string logMessage = string.Concat(context.Failure.Message, context.Failure.StackTrace, context.Failure.InnerException, context.Failure.Data);
+				log.LogError(hostPrefix, tenantId, logMessage);
+			}
+			catch { }
+
+			// Handle the error code that Azure AD B2C throws when trying to reset a password from the login page
+			// because password reset is not supported by a "sign-up or sign-in policy"
+			if (context.Failure is OpenIdConnectProtocolException ex && ex.Message.Contains("AADB2C90118"))
+			{
+				// If the user clicked the reset password link, redirect to the reset password route
+				context.Response.Redirect($"{context.Request.PathBase}/Session/ResetPassword");
+			}
+			else if (context.Failure is OpenIdConnectProtocolException e && e.Message.Contains("access_denied"))
+			{
+				context.Response.Redirect($"{context.Request.PathBase}/");
+			}
+			else
+			{
+				context.Response.Redirect($"{context.Request.PathBase}/Home/Error?message=" + HttpUtility.UrlEncode(context.Failure.Message));
+			}
+			return Task.FromResult(0);
+		}
+
+		private AzureAdB2COptions GetTenantSpecificOptions(HttpContext context)
+		{
+			ITenant tenant = new TenantDB().GetByHostname(context);
+
+			return new AzureAdB2COptions
+			{
+				TenantId = tenant.Id,
+				ClientId = tenant.B2CAppId,
+				SignInPolicyId = tenant.B2CPolicy,
+				SignUpSignInPolicyId = tenant.B2CPolicy,
+			};
+		}
+
+		private async Task HandleErrorsAsync(HttpContext context)
+		{
+			(string hostPrefix, string tenantId) = GetLogInfo(context.Request);
+
+			try
+			{
+				var path = new StringBuilder($"{context.Request.PathBase}/Home/Error");
+				var ex = context.Features.Get<IExceptionHandlerFeature>();
+				var sb = new StringBuilder();
+				for (Exception e = ex?.Error; e != null; e = e.InnerException)
+					_ = sb.AppendLine(e.Message);
+
+				string message = sb.ToString();
+				//TODO find root cause of this!
+				if (message == "ErrorCode20803: Unable to obtain configuration from: 'System.String'")
+				{
+					ErrorCode20803Count++;
+				}
+				if (ex != null)
+				{
+					ex.Error.Data.Add("ActivityId", Activity.Current?.Id ?? "");
+					ex.Error.Data.Add("TraceIdentifier", context.TraceIdentifier);
+
+					log.LogError(hostPrefix, tenantId, ex.Error);
+					LogUtil.LogError(ex.Error, tenantId, context.Request, Configuration);
+
+					_ = path.Append("?message=");
+					_ = path.Append(HttpUtility.UrlEncode(message));
+					if (!string.IsNullOrEmpty(Activity.Current?.Id))
+					{
+						_ = path.Append("&activity=");
+						_ = path.Append(HttpUtility.UrlEncode(Activity.Current.Id));
+					}
+					if (!string.IsNullOrEmpty(context.TraceIdentifier))
+					{
+						_ = path.Append("&trace=");
+						_ = path.Append(HttpUtility.UrlEncode(context.TraceIdentifier));
+					}
+				}
+				else
+				{
+					log.LogError(hostPrefix, tenantId, "Error occurred but no exception found to log.");
+					_logger.LogError("Error, no exception found to log.");
+				}
+
+				if (context.Request.Headers["Accept"].Contains("application/json"))
+				{
+					var a = new { message, traceIdentifier = context.TraceIdentifier, activityId = Activity.Current?.Id };
+					string json = JsonConvert.SerializeObject(a);
+					context.Response.ContentType = "application/json";
+					await context.Response.WriteAsync(json).ConfigureAwait(false);
+					return;
+				}
+
+				if (context.Request.Headers["Accept"].Contains("application/xml"))
+				{
+					string xml = $"<error><message>{message}</message><traceIdentifier>{context.TraceIdentifier}</traceIdentifier><activityId>{Activity.Current?.Id}</activityId></error>";
+					context.Response.ContentType = "application/xml";
+					await context.Response.WriteAsync(xml).ConfigureAwait(false);
+					return;
+				}
+
+				context.Response.Redirect(path.ToString());
+			}
+			catch (Exception newE)
+			{
+				//Don't error inside error handling
+				log.LogError(hostPrefix, tenantId, newE);
+				LogUtil.LogError(newE, tenantId, context.Request, Configuration);
+			}
+		}
+
+		private void Authorize(AuthorizationOptions o) =>
+			o.AddPolicy(Constants.AUTHORIZATION, p => p.RequireAssertion(h =>
+			{
+				if (!(h.Resource is AuthorizationFilterContext context))
+					throw new InvalidOperationException("Could not authorize");
+
+				if (!h.User.Identity.IsAuthenticated)
+					return false;
+
+				ICommonKeyVault CommonVault = GetCommonKeyVault();
+				(string hostPrefix, string tenantId) = GetLogInfo(context.HttpContext.Request);
+
+				ITenant tenant = new Tenant(hostPrefix);
+
+				IWebAPI webApi = new WebAPI(tenant.Addresses.DBAuthAPI, new Dictionary<string, string> {
+					{ Constants.DCTAPI1, tenant.DCTAPI1 },
+					{ Constants.DCTAPI2, tenant.DCTAPI2 }
+					});
+				IAuthorizationClient auth = new AuthorizationClient(webApi, tenant, Configuration, context.HttpContext);
+
+				if (string.IsNullOrEmpty(h.User.Identity.Name))
+				{
+					string userStr = string.Empty;
+					try
+					{
+						userStr = JsonConvert.SerializeObject(h.User);
+					}
+					catch (Exception ex)
+					{
+						log.LogError(hostPrefix, tenantId, ex);
+						_logger.LogError("Auth middleware.userStr error: " + ex.ToString());
+					}
+
+					log.LogError(hostPrefix, tenantId, $"Auth middleware invalid user: '{userStr}'");
+					LogUtil.LogError(new Exception($"Auth middleware invalid user: '{userStr}'"), tenant.Id, context.HttpContext.Request, Configuration);
+
+					return false;
+				}
+
+				IUser user = auth.GetUser(h.User.Identity.Name);
+
+				foreach (var req in h.Requirements.OfType<RolesAuthorizationRequirement>())
+				{
+					foreach (var role in req.AllowedRoles)
+						if (!(user?.HasPrivilege(role) ?? false))
+							h.Fail();
+
+					if (!h.HasFailed)
+						h.Succeed(req);
+				}
+
+				return true;
+			}));
+
+		private (string, string) GetLogInfo(HttpRequest request)
+		{
+			string hostPrefix;
+			try
+			{
+				hostPrefix = new CoreDomainResolver(request).GetDomainForCurrentContext(true);
+			}
+			catch {
+				// log the Host value to help resolve issues with unresolved domains.
+				hostPrefix = request?.Host.Value;
+			}
+			string tenantId;
+			try
+			{
+				tenantId = new TenantDB().GetByHostname(hostPrefix).Id;
+			}
+			catch {
+				// set tenant Id as empty string as per logging standards
+				tenantId = String.Empty;
+			}
+
+			return (hostPrefix, tenantId);
+		}
+
+		/*
+		 * Checks to ensure:
+		 * BaseAppId is defined in the vault secrets
+		 * DataProtectionStorage is defined in the vault secrets
+		 * Data Protection Key is defined in the vault keys
+		 * The associated storage account has a blob storage called 'common'
+		 * If any of the above are not valid, an error is thrown
+		 */
+		private async void CheckIsValid()
+		{
+			CommonKeyVault vault = GetCommonKeyVault();
+
+			string baseClientId = vault.GetSecret("BaseAppId");
+			if (string.IsNullOrEmpty(baseClientId))
+				throw new ArgumentNullException("BaseAppId");
+
+			if (string.IsNullOrEmpty(vault.DataProtectionStorage))
+				throw new ArgumentNullException("DataProtectionStorage");
+
+			var handler = new HttpClientHandler
+			{
+				AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+				UseProxy = false,
+				MaxConnectionsPerServer = 1000
+			};
+			var httpClient = new HttpClient(handler);
+			var kvClient = new KeyVaultClient(CommonKeyVault.TokenCallback.Invoke, httpClient);
+
+			string vaultName = Environment.GetEnvironmentVariable(Constants.KV_VAULT);
+			string vaultLink = $"https://{vaultName}.vault.azure.net";
+			string keyName = Configuration[Constants.AZURECONFIG_DATAPROTECTIONKEYNAME];
+			//This will throw an exception if DataProtectionKey does not exist
+			await kvClient.GetKeyWithHttpMessagesAsync(vaultLink, keyName, "");
+
+			var storage = CloudStorageAccount.Parse(GetCommonKeyVault().DataProtectionStorage);
+			CloudBlobClient client = storage.CreateCloudBlobClient();
+
+			IEnumerable<CloudBlobContainer> containerList = client.ListContainers();
+			if (!containerList.Any((c) => c.Name == "common"))
+			{
+				throw new ArgumentException("Storage has no container 'common'");
+			}
+
+		}
+
+		private CommonKeyVault GetCommonKeyVault()
+		{
+			CommonKeyVault vault = new CommonKeyVault(DBConfig.KVVault)
+			{
+				CertificateCache = { TTL = TimeSpan.FromMinutes(DBConfig.KeyVaultCacheRefreshInMinutes) },
+				SecretCache = { TTL = TimeSpan.FromMinutes(DBConfig.KeyVaultCacheRefreshInMinutes) },
+				ClientCache = { TTL = TimeSpan.FromDays(365) }
+			};
+			// we should not require to refresh the kv client hence setting it for a year.
+
+			return vault;
+		}
+	}
+}

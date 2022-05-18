@@ -1,6 +1,7 @@
 ﻿using DCT.EIMS.UnifiedLogin.Models;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using System.Diagnostics;
 
 namespace DCT.EIMS.UnifiedLogin.Controllers
@@ -9,13 +10,39 @@ namespace DCT.EIMS.UnifiedLogin.Controllers
     public class HomeController : Controller
     {
         private readonly ILogger<HomeController> _logger;
+        private readonly IAuthenticationSchemeProvider _schemeProvider;
+        private readonly IOptionsMonitorCache<OpenIdConnectOptions> _optionsCache;
+        private readonly OpenIdConnectPostConfigureOptions _postConfigureOptions;
 
-        public HomeController(ILogger<HomeController> logger)
+        public HomeController(ILogger<HomeController> logger, IAuthenticationSchemeProvider schemeProvider, IOptionsMonitorCache<OpenIdConnectOptions> optionsCache /*, OpenIdConnectPostConfigureOptions postConfigureOptions*/)
         {
             _logger = logger;
+            _schemeProvider = schemeProvider;
+            _optionsCache = optionsCache;
+           // _postConfigureOptions = postConfigureOptions;
         }
         public IActionResult Start()
         {
+            /*
+            var OIDCoptions = new MicrosoftIdentityOptions
+            {
+                Instance = "https://NMTechie.b2clogin.com/",
+                ClientId = "531949b7-61ed-4085-8bbc-2e9ae6575425",
+                CallbackPath = "/Home",
+                Domain = "NMTechie.onmicrosoft.com",
+                ClientSecret = "S488Q~qAA_eBYrQtCrwhf7iIVjFin41yn1TFjdr0",
+                SignUpSignInPolicyId = "B2C_1_UnifiedLoginPolicy2",
+                SaveTokens = true,
+                ResponseType = OpenIdConnectResponseType.Code
+            };
+            OIDCoptions.Scope.Add("531949b7-61ed-4085-8bbc-2e9ae6575425");
+            OIDCoptions.Scope.Add("offline_access");
+            var handlers = this.HttpContext.RequestServices.GetRequiredService<OpenIdConnectHandler>();
+            _schemeProvider.RemoveScheme(OpenIdConnectDefaults.AuthenticationScheme);
+            _schemeProvider.AddScheme(new AuthenticationScheme(OpenIdConnectDefaults.AuthenticationScheme, OpenIdConnectDefaults.AuthenticationScheme, typeof(OpenIdConnectHandler)));
+            var p = _optionsCache.TryRemove(OpenIdConnectDefaults.AuthenticationScheme);
+            _postConfigureOptions.PostConfigure(OpenIdConnectDefaults.AuthenticationScheme, OIDCoptions);
+            var q = _optionsCache.TryAdd(OpenIdConnectDefaults.AuthenticationScheme, OIDCoptions);*/
             return new OkObjectResult(new { Message = "The SuiteLogin Strated" });
         } 
 
