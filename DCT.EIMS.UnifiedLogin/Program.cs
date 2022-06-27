@@ -35,7 +35,7 @@ builder.Services.AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
 void SetupAzureADB2CHnadShakeOptions(MicrosoftIdentityOptions options)
 {
     builder.Configuration.Bind("AzureADB2C", options);
-    options.ClientSecret = "uvc7Q~Jjb.fbuJiGTwvvbdigPh0d_ITtGsZ~z";
+    options.ClientSecret = "-aE8Q~YoqdqXYvVbpuqrTyCc5n79hPF-dQ9xgcb-";
     options.Scope.Add(options.ClientId);
     options.Scope.Add("offline_access");
     options.SaveTokens = true;
@@ -53,6 +53,8 @@ Task ConfigureIDPParameters(RedirectContext redirectContext)
 {
     redirectContext.ProtocolMessage.IssuerAddress = @"https://nmtechie.b2clogin.com/nmtechie.onmicrosoft.com/b2c_1_unifiedloginpolicy1/oauth2/v2.0/authorize";
     redirectContext.Options.Authority = @"https://nmtechie.b2clogin.com/NMTechie.onmicrosoft.com/B2C_1_UnifiedLoginPolicy1/v2.0";
+    redirectContext.Options.MetadataAddress = $"{UnifiedAuthConstant.B2CInstance}/{UnifiedAuthConstant.B2CDomain}/{policyID}/v2.0/.well-known/openid-configuration";
+    redirectContext.Options.ConfigurationManager = new Microsoft.IdentityModel.Protocols.ConfigurationManager<OpenIdConnectConfiguration>(redirectContext.Options.MetadataAddress, new OpenIdConnectConfigurationRetriever());
     return Task.FromResult(0);
 }
 
