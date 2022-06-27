@@ -1,5 +1,6 @@
 
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.IdentityModel.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -42,7 +43,7 @@ void SetupAzureADB2CHnadShakeOptions(MicrosoftIdentityOptions options)
     options.ResponseType = OpenIdConnectResponseType.Code;
     options.Events = new OpenIdConnectEvents()
     {
-        OnMessageReceived =  HandleMessageReceived,
+        OnMessageReceived = HandleMessageReceived,
         OnRemoteFailure = HandleRemoteFailure,
         OnRedirectToIdentityProvider = ConfigureIDPParameters
     };
@@ -76,6 +77,11 @@ if (!app.Environment.IsDevelopment())
     app.UseExceptionHandler("/Home/Error");
     // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
     app.UseHsts();
+}
+else
+{
+    IdentityModelEventSource.ShowPII = true;
+
 }
 
 app.UseHttpsRedirection();
