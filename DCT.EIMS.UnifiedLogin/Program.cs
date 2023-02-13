@@ -1,4 +1,5 @@
 
+using DCT.EIMS.UnifiedLogin;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.IdentityModel.Logging;
 
@@ -32,15 +33,21 @@ builder.Services.AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
 */
 builder.Services.AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
  .AddMicrosoftIdentityWebApp(SetupAzureADB2CHnadShakeOptions);
-
+/*
+ * All are in perspective of B2C setup
+ * The fundmental thing is that , 
+ * If you need ID_token then it works both in implicit grant and hybrid flows --> means does not require client secrect and responsetype to be auth code flow
+ * if you need access_token then it requires the Implicit grant if you doesnot pass client secrect --> menas responsetype is not auth code flow
+ * if you need access_token with auth code flow , then you require a client secrect and response type is auth code flow --> means do not require implicit grant 
+ */
 void SetupAzureADB2CHnadShakeOptions(MicrosoftIdentityOptions options)
 {
     builder.Configuration.Bind("AzureADB2C", options);
-    options.ClientSecret = "-aE8Q~YoqdqXYvVbpuqrTyCc5n79hPF-dQ9xgcb-";
+    //options.ClientSecret = "-aE8Q~YoqdqXYvVbpuqrTyCc5n79hPF-dQ9xgcb-";
     options.Scope.Add(options.ClientId);
     options.Scope.Add("offline_access");
     options.SaveTokens = true;
-    options.ResponseType = OpenIdConnectResponseType.Code;
+    //options.ResponseType = OpenIdConnectResponseType.Code;
     options.Events = new OpenIdConnectEvents()
     {
         OnMessageReceived = HandleMessageReceived,
@@ -51,10 +58,10 @@ void SetupAzureADB2CHnadShakeOptions(MicrosoftIdentityOptions options)
 }
 
 Task ConfigureIDPParameters(RedirectContext redirectContext)
-{
-    redirectContext.ProtocolMessage.IssuerAddress = @"https://nmtechie.b2clogin.com/nmtechie.onmicrosoft.com/b2c_1_unifiedloginpolicy1/oauth2/v2.0/authorize";
-    redirectContext.Options.Authority = @"https://nmtechie.b2clogin.com/NMTechie.onmicrosoft.com/B2C_1_UnifiedLoginPolicy1/v2.0";
-    redirectContext.Options.MetadataAddress = $"{UnifiedAuthConstant.B2CInstance}/{UnifiedAuthConstant.B2CDomain}/{policyID}/v2.0/.well-known/openid-configuration";
+{   
+    redirectContext.ProtocolMessage.IssuerAddress = @"https://SuiteLoginExp.b2clogin.com/SuiteLoginExp.onmicrosoft.com/b2c_1_unifiedloginpolicy1/oauth2/v2.0/authorize";
+    redirectContext.Options.Authority = @"https://SuiteLoginExp.b2clogin.com/SuiteLoginExp.onmicrosoft.com/B2C_1_UnifiedLoginPolicy1/v2.0";
+    redirectContext.Options.MetadataAddress = $"{UnifiedAuthConstant.B2CInstance}/{UnifiedAuthConstant.B2CDomain}/{UnifiedAuthConstant.policyID}/v2.0/.well-known/openid-configuration";
     redirectContext.Options.ConfigurationManager = new Microsoft.IdentityModel.Protocols.ConfigurationManager<OpenIdConnectConfiguration>(redirectContext.Options.MetadataAddress, new OpenIdConnectConfigurationRetriever());
     return Task.FromResult(0);
 }
@@ -74,6 +81,7 @@ var app = builder.Build();
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
 {
+    IdentityModelEventSource.ShowPII = true;
     app.UseExceptionHandler("/Home/Error");
     // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
     app.UseHsts();
