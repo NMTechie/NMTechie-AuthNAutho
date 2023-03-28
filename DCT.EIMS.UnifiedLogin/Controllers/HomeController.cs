@@ -2,7 +2,9 @@
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using Microsoft.Identity.Client;
 using System.Diagnostics;
+using System.Security.Claims;
 
 namespace DCT.EIMS.UnifiedLogin.Controllers
 {
@@ -13,13 +15,15 @@ namespace DCT.EIMS.UnifiedLogin.Controllers
         private readonly IAuthenticationSchemeProvider _schemeProvider;
         private readonly IOptionsMonitorCache<OpenIdConnectOptions> _optionsCache;
         private readonly OpenIdConnectPostConfigureOptions _postConfigureOptions;
+        private readonly ITokenAcquisition _tokenAcquisition;
 
-        public HomeController(ILogger<HomeController> logger, IAuthenticationSchemeProvider schemeProvider, IOptionsMonitorCache<OpenIdConnectOptions> optionsCache /*, OpenIdConnectPostConfigureOptions postConfigureOptions*/)
+        public HomeController(ILogger<HomeController> logger, IAuthenticationSchemeProvider schemeProvider, IOptionsMonitorCache<OpenIdConnectOptions> optionsCache,ITokenAcquisition tokenAcquisition /*, OpenIdConnectPostConfigureOptions postConfigureOptions*/)
         {
             _logger = logger;
             _schemeProvider = schemeProvider;
             _optionsCache = optionsCache;
            // _postConfigureOptions = postConfigureOptions;
+           _tokenAcquisition = tokenAcquisition;
         }
         public IActionResult Start()
         {
@@ -69,9 +73,21 @@ namespace DCT.EIMS.UnifiedLogin.Controllers
             */
             return new OkObjectResult(new { IdToken = idToken, AccessToken = accessToken, RefreshToken = refreshToken });
         }
-
-        public IActionResult Privacy()
+        [Authorize]
+        public async Task<IActionResult> Privacy()
         {
+            /*
+            IPublicClientApplication app;
+            app = PublicClientApplicationBuilder.Create("e5fd7b8f-1af2-4762-8bf4-47f6067e21dd")
+                .WithAuthority(new Uri("https://SuiteLoginExp.b2clogin.com/SuiteLoginExp.onmicrosoft.com/B2C_1_UnifiedLoginPolicy1/v2.0"))
+                .WithRedirectUri("https://localhost:7147/Home")
+                .Build();
+            MSALPerUserMemoryTokenCache _ = new MSALPerUserMemoryTokenCache(ClientApp.UserTokenCache, currentUser ?? ClaimsPrincipal.Current);
+            var account = await app.GetAccountAsync(ClaimsPrincipal.Current.GetMsalAccountId());
+            var scopes = new string[] { "https://SuiteLoginExp.onmicrosoft.com/bf6d1fdf-7749-47b2-ad05-0ab448889752/user_impersonation" };
+            AuthenticationResult result = await app.AcquireTokenSilent(scopes,account).ExecuteAsync().ConfigureAwait(false);
+            */
+            var accessToken = await _tokenAcquisition.GetAccessTokenForUserAsync(new[] { "https://SuiteLoginExp.onmicrosoft.com/bf6d1fdf-7749-47b2-ad05-0ab448889752/user_impersonation" });
             return View();
         }
 

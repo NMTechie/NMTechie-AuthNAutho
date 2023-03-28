@@ -32,22 +32,33 @@ builder.Services.AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
  });
 */
 builder.Services.AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
- .AddMicrosoftIdentityWebApp(SetupAzureADB2CHnadShakeOptions);
+ .AddMicrosoftIdentityWebApp(SetupAzureADB2CHnadShakeOptions)
+ .EnableTokenAcquisitionToCallDownstreamApi()
+ .AddInMemoryTokenCaches();
 /*
  * All are in perspective of B2C setup
  * The fundmental thing is that , 
- * If you need ID_token then it works both in implicit grant and hybrid flows --> means does not require client secrect and responsetype to be auth code flow
- * if you need access_token then it requires the Implicit grant if you doesnot pass client secrect --> menas responsetype is not auth code flow
- * if you need access_token with auth code flow , then you require a client secrect and response type is auth code flow --> means do not require implicit grant 
+ * ***************
+ * If you need ID_token then it works both in implicit grant and hybrid flows --> 
+ * means does not require client secrect and responsetype to be auth code flow
+ * However, above requires implicit grant flow to be allowed as part of this as part of the B2C app registrations.
+ * *****************
+ * if you need access_token then it requires the Implicit grant 
+ * if you doesnot pass client secrect --> means responsetype is not auth code flow
+ * if you need access_token with auth code flow , then you require a 
+ * client secrect and response type is auth code flow --> means do not require implicit grant 
+ * *******************
+ * 
  */
 void SetupAzureADB2CHnadShakeOptions(MicrosoftIdentityOptions options)
 {
     builder.Configuration.Bind("AzureADB2C", options);
-    //options.ClientSecret = "-aE8Q~YoqdqXYvVbpuqrTyCc5n79hPF-dQ9xgcb-";
-    options.Scope.Add(options.ClientId);
-    options.Scope.Add("offline_access");
-    options.SaveTokens = true;
-    //options.ResponseType = OpenIdConnectResponseType.Code;
+    options.ClientSecret = "kRN8Q~WyBsX15~uz4mi2O8KxoI~dJuUZeRPjtadv";
+    //options.Scope.Add(options.ClientId);
+    //options.Scope.Add("offline_access");
+    options.SaveTokens = true; 
+    //options.ResponseType = OpenIdConnectResponseType.IdToken;
+    options.ResponseType = OpenIdConnectResponseType.Code;
     options.Events = new OpenIdConnectEvents()
     {
         OnMessageReceived = HandleMessageReceived,
